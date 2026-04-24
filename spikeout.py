@@ -235,8 +235,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--tmpdir",
-        default=None,
-        help="Optional directory for temporary intermediate files.",
+        default=".",
+        help="Optional directory for temporary intermediate files (default current dir).",
     )
     parser.add_argument(
         "--quiet",
