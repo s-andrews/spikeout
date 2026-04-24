@@ -26,6 +26,7 @@ Options:
 - `--mapq / -q`: MAPQ cutoff (default: `20`)
 - `--output / -o`: output TSV path (default: stdout)
 - `--tmpdir`: optional temp directory for intermediates
+- `--threads`: number of file pairs to process in parallel (default: `1`)
 
 ## Output
 

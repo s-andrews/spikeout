@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, TextIO
@@ -152,6 +153,7 @@ def quantify_pair(
     verbose: bool = False,
     pair_progress_label: str = "",
 ) -> tuple[int, int]:
+    temp_dir.mkdir(parents=True, exist_ok=True)
     raw1 = temp_dir / f"{pair.sample_prefix}.{pair.bam1.assembly}.raw.txt"
     raw2 = temp_dir / f"{pair.sample_prefix}.{pair.bam2.assembly}.raw.txt"
     uniq1 = temp_dir / f"{pair.sample_prefix}.{pair.bam1.assembly}.uniq.txt"
@@ -243,6 +245,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Suppress progress and pairing summary messages.",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help=(
+            "Number of BAM pairs to process concurrently (default: 1). "
+            "Use values >1 to enable parallel pair processing."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -251,6 +262,9 @@ def main(argv: list[str] | None = None) -> int:
     verbose = not args.quiet
 
     try:
+        if args.threads < 1:
+            raise ValueError("--threads must be >= 1")
+
         bam_paths = [Path(p).resolve() for p in args.bams]
         for p in bam_paths:
             if not p.exists():
@@ -277,30 +291,39 @@ def main(argv: list[str] | None = None) -> int:
 
         with tempfile.TemporaryDirectory(dir=args.tmpdir) as tmp:
             temp_dir = Path(tmp)
-            counts: list[tuple[int, int]] = []
-            for i, pair in enumerate(pairs, start=1):
-                log_progress(
-                    verbose,
-                    (
-                        f"Processing pair {i}/{len(pairs)} ({pair.sample_prefix}): "
-                        "extracting passing read names"
-                    ),
-                )
-                count = quantify_pair(
-                    pair,
-                    args.mapq,
-                    temp_dir,
-                    verbose=verbose,
-                    pair_progress_label=f"Pair {i}/{len(pairs)} ({pair.sample_prefix}):",
-                )
-                counts.append(count)
-                log_progress(
-                    verbose,
-                    (
-                        f"Processing pair {i}/{len(pairs)} ({pair.sample_prefix}): "
-                        "complete"
-                    ),
-                )
+            counts: list[tuple[int, int]] = [(-1, -1)] * len(pairs)
+            max_workers = min(args.threads, len(pairs))
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_positions = []
+                for i, pair in enumerate(pairs, start=1):
+                    log_progress(
+                        verbose,
+                        (
+                            f"Processing pair {i}/{len(pairs)} ({pair.sample_prefix}): "
+                            "scheduled"
+                        ),
+                    )
+                    pair_temp_dir = temp_dir / f"pair_{i:04d}_{pair.mapper}"
+                    future = executor.submit(
+                        quantify_pair,
+                        pair,
+                        args.mapq,
+                        pair_temp_dir,
+                        verbose,
+                        f"Pair {i}/{len(pairs)} ({pair.sample_prefix}):",
+                    )
+                    future_positions.append((i - 1, pair, future))
+
+                for index, pair, future in future_positions:
+                    counts[index] = future.result()
+                    log_progress(
+                        verbose,
+                        (
+                            f"Processing pair {index + 1}/{len(pairs)} "
+                            f"({pair.sample_prefix}): complete"
+                        ),
+                    )
 
         if args.output == "-":
             write_output(pairs, counts, assemblies, sys.stdout)
