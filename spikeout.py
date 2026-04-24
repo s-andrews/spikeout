@@ -145,21 +145,37 @@ def count_set_differences(sorted_a: Path, sorted_b: Path) -> tuple[int, int]:
     return unique_a, unique_b
 
 
-def quantify_pair(pair: BamPair, mapq_cutoff: int, temp_dir: Path) -> tuple[int, int]:
+def quantify_pair(
+    pair: BamPair,
+    mapq_cutoff: int,
+    temp_dir: Path,
+    verbose: bool = False,
+    pair_progress_label: str = "",
+) -> tuple[int, int]:
     raw1 = temp_dir / f"{pair.sample_prefix}.{pair.bam1.assembly}.raw.txt"
     raw2 = temp_dir / f"{pair.sample_prefix}.{pair.bam2.assembly}.raw.txt"
     uniq1 = temp_dir / f"{pair.sample_prefix}.{pair.bam1.assembly}.uniq.txt"
     uniq2 = temp_dir / f"{pair.sample_prefix}.{pair.bam2.assembly}.uniq.txt"
 
+    log_progress(
+        verbose,
+        f"{pair_progress_label} 1/4 extracting reads from {pair.bam1.path.name}",
+    )
     write_passing_read_names(pair.bam1.path, mapq_cutoff, raw1)
+    log_progress(
+        verbose,
+        f"{pair_progress_label} 2/4 extracting reads from {pair.bam2.path.name}",
+    )
     write_passing_read_names(pair.bam2.path, mapq_cutoff, raw2)
 
+    log_progress(verbose, f"{pair_progress_label} 3/4 sorting and deduplicating read names")
     sort_unique_input(raw1, uniq1)
     sort_unique_input(raw2, uniq2)
 
     raw1.unlink(missing_ok=True)
     raw2.unlink(missing_ok=True)
 
+    log_progress(verbose, f"{pair_progress_label} 4/4 counting unique reads per assembly")
     return count_set_differences(uniq1, uniq2)
 
 
@@ -191,6 +207,11 @@ def write_output(
         output_handle.write(f"{pair.sample_prefix}\t{count1}\t{count2}\n")
 
 
+def log_progress(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message, file=sys.stderr)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="spikeout",
@@ -217,11 +238,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="Optional directory for temporary intermediate files.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress and pairing summary messages.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    verbose = not args.quiet
 
     try:
         bam_paths = [Path(p).resolve() for p in args.bams]
@@ -231,10 +258,49 @@ def main(argv: list[str] | None = None) -> int:
 
         pairs = build_pairs(bam_paths)
         assemblies = validate_assemblies(pairs)
+        log_progress(
+            verbose,
+            (
+                f"Found {len(pairs)} BAM pair(s) using assemblies: "
+                f"{assemblies[0]} and {assemblies[1]}"
+            ),
+        )
+        for i, pair in enumerate(pairs, start=1):
+            log_progress(
+                verbose,
+                (
+                    f"Pair {i}/{len(pairs)}: sample={pair.sample_prefix}, mapper={pair.mapper}, "
+                    f"{pair.bam1.assembly}={pair.bam1.path.name}, "
+                    f"{pair.bam2.assembly}={pair.bam2.path.name}"
+                ),
+            )
 
         with tempfile.TemporaryDirectory(dir=args.tmpdir) as tmp:
             temp_dir = Path(tmp)
-            counts = [quantify_pair(pair, args.mapq, temp_dir) for pair in pairs]
+            counts: list[tuple[int, int]] = []
+            for i, pair in enumerate(pairs, start=1):
+                log_progress(
+                    verbose,
+                    (
+                        f"Processing pair {i}/{len(pairs)} ({pair.sample_prefix}): "
+                        "extracting passing read names"
+                    ),
+                )
+                count = quantify_pair(
+                    pair,
+                    args.mapq,
+                    temp_dir,
+                    verbose=verbose,
+                    pair_progress_label=f"Pair {i}/{len(pairs)} ({pair.sample_prefix}):",
+                )
+                counts.append(count)
+                log_progress(
+                    verbose,
+                    (
+                        f"Processing pair {i}/{len(pairs)} ({pair.sample_prefix}): "
+                        "complete"
+                    ),
+                )
 
         if args.output == "-":
             write_output(pairs, counts, assemblies, sys.stdout)
